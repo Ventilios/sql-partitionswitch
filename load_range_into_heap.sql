@@ -1,11 +1,11 @@
----------------------------------------------------------------------------------------
--- Load range into heap partitioned table, create aligned clustered index after loading
----------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------
+-- Load range into heap partitioned table, create aligned clustered index after loading.
+-- Although initially the table is a Heap, this strategy is not usable for 
+-- parallel laoding into the same stage table.
+----------------------------------------------------------------------------------------
 SET NOCOUNT ON;
 
-/*
 -- Initial stage table without clustered index
-*/
 if object_id('dbo.StageTable') is not null 
 	drop table StageTable
 go 
@@ -35,11 +35,13 @@ DECLARE @EndDateTime DATETIME;
 
 PRINT @StartDate;
 
+
 -- Calculate first day of the next month
 SELECT	@BeginDateTime = dateadd(day, datediff(day, 0, @StartDate), 0),
 		@EndDateTime = dateadd(month, datediff(month, 0, @StartDate)+1, 0) -- < 2019-05-01 00:00:00.000
 		
 SELECT @BeginDateTime, @EndDateTime;
+
 
 -- Load data into staging table
 -- WARNING: TABLOCK will not support parallel loading on a CLUSTERED INDEX!
