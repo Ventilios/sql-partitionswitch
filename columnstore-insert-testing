@@ -1,0 +1,403 @@
+------------------------------------------------------------------------------------------
+-- Create Partitioning function 
+------------------------------------------------------------------------------------------
+DECLARE @lastDateId DATETIME =  {ts '2018-12-31 00:00:00.000'}
+DECLARE @maxDateId DATETIME =  dateadd(year,1,{ts '2019-01-01 00:00:00.000'})
+
+CREATE PARTITION FUNCTION [pf_CCIByDate](datetime2) 
+AS RANGE RIGHT FOR VALUES (@lastDateid)
+
+-- Add 1 partition per day
+WHILE @lastDateId < @maxDateid
+BEGIN
+ SET @lastDateId=@lastDateId+1
+
+ ALTER PARTITION FUNCTION [pf_CCIByDate]()
+	SPLIT RANGE (@LastDateid)
+END
+
+------------------------------------------------------------------------------------------
+-- Create Partitioning Scheme 
+------------------------------------------------------------------------------------------
+CREATE PARTITION SCHEME [ps_CCIbyDate] 
+AS PARTITION [pf_CCIByDate]  ALL TO ([PRIMARY])
+GO
+
+
+------------------------------------------------------------------------------------------
+-- Create Source table tCciSource
+------------------------------------------------------------------------------------------
+IF OBJECT_ID('dbo.tTestSource') IS NOT NULL 
+	DROP TABLE dbo.tTestSource;
+GO 
+
+CREATE TABLE dbo.tTestSource(
+	id UNIQUEIDENTIFIER, 
+	eventDate DATETIME2,
+	c2 INT, 
+	c3 VARCHAR(50),
+	c4 BIGINT
+	,c6 VARBINARY(512)
+	,INDEX CIX_tCciSource CLUSTERED COLUMNSTORE
+)
+--ON [ps_CCIbyDate](eventDate)
+
+
+------------------------------------------------------------------------------------------
+-- Populate partitoned table
+------------------------------------------------------------------------------------------
+-- insert millions of rows
+-- 50 million rows in 22 min
+DECLARE @batch INT = 50;
+DECLARE @lastCount INT = 0;
+
+WHILE @lastCount < @batch
+BEGIN
+	-- 1m per iteration
+	INSERT INTO dbo.tCciSource
+	SELECT
+		 newid() AS id 
+		,dateadd(second,(RAND(checksum(newid())) * 31535999),  {ts '2019-01-01 00:00:00.000'}) AS eventDate
+		,convert(int,rand(checksum(newid())) * 2147483647 ) AS c2
+		,REPLICATE(char(convert(int,rand(checksum(newid())) * 256)),convert(int,rand(checksum(newid())) * 50)) AS c3
+		,convert(bigint,rand(checksum(newid())) * 9223372036854775807 ) AS c4
+		, HASHBYTES('SHA2_256', REPLICATE(char(convert(int,rand(checksum(newid())) * 256)),convert(int,rand(checksum(newid())) * 1024))) AS c6
+	  INTO #tempStage
+	FROM (SELECT TOP 1024 1 x from sys.all_columns) tt1
+	CROSS JOIN (SELECT TOP 1024 1 x from sys.all_columns) tt2
+	
+	BEGIN TRANSACTION
+		INSERT INTO dbo.tCciSource 
+		SELECT * FROM #tempStage
+
+		SET @lastCount = @lastCount+1;
+		PRINT @lastCount;
+	COMMIT TRANSACTION
+
+	DROP TABLE #tempStage;
+END;
+
+
+
+-- 8:36
+-- truncate table dbo.tCciSource
+-- ALTER INDEX CIX_tCciSource ON dbo.tCciSource REBUILD PARTITION = ALL
+
+------------------------------------------------------------------------------------------
+-- Create partitioned target tables
+------------------------------------------------------------------------------------------
+
+-- First Stage table
+IF OBJECT_ID('dbo.tCciNonPart') IS NOT NULL 
+	DROP TABLE tCciNonPart
+GO 
+
+CREATE TABLE tCciNonPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciNonPart CLUSTERED COLUMNSTORE
+)
+--ON [ps_CCIbyDate](eventDate)
+
+
+/*
+-- Without tablock, Partitioned
+-- 4m 40s -> 365 rowgroups
+-- Including ORDER BY on partition key: 4m 18s
+*/
+IF OBJECT_ID('dbo.tCciPart') IS NOT NULL 
+	DROP TABLE tCciPart
+GO 
+
+CREATE TABLE tCciPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciPart CLUSTERED COLUMNSTORE
+)
+ON [ps_CCIbyDate](eventDate)
+
+
+INSERT INTO dbo.tCciPart 
+SELECT id, eventdate, c2, c3, c4, c6 FROM dbo.tCciSource;
+--SELECT id, eventdate, c2, c3, c4, c6 FROM dbo.tCciSource ORDER BY eventdate;
+
+
+/*
+-- With tablock, Partitioned
+-- 37m -> 2920 rowgroups
+*/
+IF OBJECT_ID('dbo.tCciPart') IS NOT NULL 
+	DROP TABLE tCciPart
+GO 
+
+CREATE TABLE tCciPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciPart CLUSTERED COLUMNSTORE
+)
+ON [ps_CCIbyDate](eventDate)
+
+
+INSERT INTO dbo.tCciPart WITH(tablock)
+SELECT id, eventdate, c2, c3, c4, c6 FROM dbo.tCciSource 
+
+
+/*
+-- Without tablock, Non-partitioned
+-- 7m 35s -> Creates rowgroups of 1048576 rows, resulting into 50 rowgroups
+*/
+IF OBJECT_ID('dbo.tCciNonPart') IS NOT NULL 
+	DROP TABLE tCciNonPart
+GO 
+
+CREATE TABLE tCciNonPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciNonPart CLUSTERED COLUMNSTORE
+)
+
+INSERT INTO dbo.tCciNonPart 
+SELECT id, eventdate, c2, c3, c4, c6 FROM dbo.tCciSource 
+
+
+/*
+-- With tablock, Non-partitioned
+-- 1m 24s -> Creates rowrgroups of 1048576 rows, resulting into 50 rowgroups
+*/
+IF OBJECT_ID('dbo.tCciNonPart') IS NOT NULL 
+	DROP TABLE tCciNonPart
+GO 
+
+CREATE TABLE tCciNonPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciNonPart CLUSTERED COLUMNSTORE
+)
+
+INSERT INTO dbo.tCciNonPart WITH (TABLOCK) 
+SELECT id, eventdate, c2, c3, c4, c6 FROM dbo.tCciSource 
+
+
+-- Add index for eventDate to Source table
+CREATE INDEX ix_eventdate ON dbo.tCciSource(eventDate);
+
+
+/*
+-- Partitioned table
+*/
+IF OBJECT_ID('dbo.tCciPart') IS NOT NULL 
+	DROP TABLE tCciPart
+GO 
+
+CREATE TABLE tCciPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciPart CLUSTERED COLUMNSTORE
+)
+ON [ps_CCIbyDate](eventDate)
+
+
+/*
+-- 
+-- Insert per day aligned with the partition function on the table
+-- This will bring a bit of overhead but keeps yours clustered columnstore in a better shape 
+-- WITHOUT TABLOCK Execution time is around 13 40s
+-- Including order by (partition key) time: 13m 24s
+*/
+DECLARE @StartDate DATETIME = '2019-01-01';
+DECLARE @EndOfRange DATETIME;
+DECLARE @EndDate DATETIME = '2019-12-31';
+
+WHILE (@StartDate <= @EndDate)
+
+BEGIN
+
+	SET @EndOfRange = DATEADD(day, 1, @StartDate);
+	PRINT @StartDate;
+	PRINT @EndOfRange
+
+	BEGIN TRANSACTION
+		INSERT INTO dbo.tCciPart
+		SELECT id, eventdate, c2, c3, c4, c6 
+		FROM dbo.tCciSource
+		WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange;
+	COMMIT TRANSACTION;
+
+	set @StartDate = DATEADD(day, 1, @StartDate);
+
+END;
+
+
+/*
+-- 
+-- Insert per day aligned with the partition function on the table
+-- WITH TABLOCK  Execution time is around 30m 30s
+*/
+DECLARE @StartDate DATETIME = '2019-01-01';
+DECLARE @EndOfRange DATETIME;
+DECLARE @EndDate DATETIME = '2019-12-31';
+
+WHILE (@StartDate <= @EndDate)
+
+BEGIN
+
+	SET @EndOfRange = DATEADD(day, 1, @StartDate);
+	PRINT @StartDate;
+	PRINT @EndOfRange
+
+	BEGIN TRANSACTION
+		INSERT INTO dbo.tCciPart WITH(TABLOCK)
+		SELECT id, eventdate, c2, c3, c4, c6 
+		FROM dbo.tCciSource
+		WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange
+		ORDER BY [eventdate];
+	COMMIT TRANSACTION;
+
+	set @StartDate = DATEADD(day, 1, @StartDate);
+
+END;
+
+
+
+/*
+--
+-- Partition switch loading
+--
+*/
+IF OBJECT_ID('dbo.tCciStage') IS NOT NULL 
+	DROP TABLE tCciStage
+GO 
+
+CREATE TABLE tCciStage (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciStage CLUSTERED COLUMNSTORE
+)
+ON [ps_CCIbyDate](eventDate)
+
+
+IF OBJECT_ID('dbo.tCciPart') IS NOT NULL 
+	DROP TABLE tCciPart
+GO 
+
+CREATE TABLE tCciPart (
+	id uniqueidentifier, 
+	eventDate datetime2,
+	c2 int, 
+	c3 varchar(50),
+	c4 bigint
+	,c6 varbinary(512)
+	,INDEX CIX_tCciPart CLUSTERED COLUMNSTORE
+)
+ON [ps_CCIbyDate](eventDate)
+
+
+DECLARE @StartDate DATETIME = '2019-01-01';
+DECLARE @EndOfRange DATETIME;
+DECLARE @EndDate DATETIME = '2019-12-31';
+
+WHILE (@StartDate <= @EndDate)
+
+BEGIN
+
+	SET @EndOfRange = DATEADD(day, 1, @StartDate);
+	PRINT @StartDate;
+	PRINT @EndOfRange
+	
+	INSERT INTO dbo.tCciStage WITH (TABLOCK)
+	SELECT id, eventdate, c2, c3, c4, c6 
+	FROM dbo.tCciSource
+	WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange;
+
+	set @StartDate = DATEADD(day, 1, @StartDate);
+
+END;
+
+
+-- 2m 45s
+INSERT INTO dbo.tCciStage
+SELECT id, eventdate, c2, c3, c4, c6 FROM dbo.tCciSource;
+
+
+-- 9m 30s
+--CREATE CLUSTERED COLUMNSTORE INDEX CIX_tCciStage 
+--ON dbo.tCciStage
+--ON [ps_CCIbyDate](eventDate);
+	   
+
+-- Move Partition
+EXEC [dbo].[MovePartitionSF] @FinalTable = 'dbo.tCciPart', @StageTable = 'dbo.tCciStage';
+
+
+
+/*
+-- Loading data in different sessions
+*/
+
+-- Session 1
+DECLARE @StartDate DATETIME = '2019-01-01',
+@EndOfRange DATETIME = '2019-04-01'
+
+INSERT INTO dbo.tCciPart 
+SELECT id, eventdate, c2, c3, c4, c6 
+FROM dbo.tCciSource
+WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange
+ORDER BY eventdate;
+
+-- Session 2
+DECLARE @StartDate DATETIME = '2019-04-01',
+@EndOfRange DATETIME = '2019-07-01'
+
+INSERT INTO dbo.tCciPart 
+SELECT id, eventdate, c2, c3, c4, c6 
+FROM dbo.tCciSource
+WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange
+ORDER BY eventdate;
+
+-- Session 3
+DECLARE @StartDate DATETIME = '2019-07-01',
+@EndOfRange DATETIME = '2019-10-01'
+
+INSERT INTO dbo.tCciPart 
+SELECT id, eventdate, c2, c3, c4, c6 
+FROM dbo.tCciSource
+WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange
+ORDER BY eventdate;
+
+-- Session 4
+DECLARE @StartDate DATETIME = '2019-10-01',
+@EndOfRange DATETIME = '2020-10-01'
+
+INSERT INTO dbo.tCciPart 
+SELECT id, eventdate, c2, c3, c4, c6 
+FROM dbo.tCciSource
+WHERE [eventdate] >= @StartDate and [eventdate] < @EndOfRange
+ORDER BY eventdate;
