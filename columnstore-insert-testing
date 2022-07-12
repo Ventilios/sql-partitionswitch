@@ -54,7 +54,6 @@ DECLARE @lastCount INT = 0;
 WHILE @lastCount < @batch
 BEGIN
 	-- 1m per iteration
-	INSERT INTO dbo.tCciSource
 	SELECT
 		 newid() AS id 
 		,dateadd(second,(RAND(checksum(newid())) * 31535999),  {ts '2019-01-01 00:00:00.000'}) AS eventDate
@@ -76,8 +75,6 @@ BEGIN
 
 	DROP TABLE #tempStage;
 END;
-
-
 
 -- 8:36
 -- truncate table dbo.tCciSource
